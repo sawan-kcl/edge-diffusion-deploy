@@ -1,0 +1,22 @@
+# Installed INSIDE the NGC PyTorch container (which already provides torch + TensorRT + CUDA).
+# Do not pin torch here — use the container's build.
+
+diffusers>=0.32.0        # SANA support (SanaPipeline) landed here
+transformers>=4.46.0     # Gemma-2 text encoder used by SANA
+accelerate>=1.0.0        # device placement / cpu offload
+sentencepiece            # tokenizer dep for the text encoder
+protobuf                 # tokenizer/proto dep
+safetensors
+Pillow
+hf_transfer              # fast parallel downloads (Dockerfile sets HF_HUB_ENABLE_HF_TRANSFER=1)
+
+# metrics / telemetry
+torchmetrics>=1.5.0      # CLIPScore (quality proxy); optional at runtime
+nvidia-ml-py>=12.560.30  # pynvml — GPU temp / power / VRAM logging
+
+# demo UI (Phase: live demo)
+gradio>=4.44.0
+
+# optimization phase (install when you reach Phase C; some are heavy)
+# optimum-quanto>=0.2.4  # INT8/FP8 quantization
+# torchao                # alternative quantization

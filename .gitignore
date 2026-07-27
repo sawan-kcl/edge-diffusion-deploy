@@ -1,0 +1,27 @@
+# weights & generated artifacts — never commit
+models/
+outputs/
+*.safetensors
+*.bin
+*.pt
+*.engine
+*.plan
+*.onnx
+*.pth
+*.ckpt
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# local / editor
+.env
+*.log
+.DS_Store
+.vscode/
+
+# internal project notes — not for public repo
+CLAUDE.md
