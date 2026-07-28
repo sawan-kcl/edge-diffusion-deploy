@@ -1,8 +1,14 @@
 # Installed INSIDE the NGC PyTorch container (which already provides torch + TensorRT + CUDA).
 # Do not pin torch here — use the container's build.
 
-diffusers>=0.32.0        # SANA support (SanaPipeline) landed here
-transformers>=4.46.0     # Gemma-2 text encoder used by SANA
+diffusers==0.32.2        # SANA support (SanaPipeline); pinned exact — see note below
+transformers==4.46.3     # Gemma-2 text encoder used by SANA; pinned exact — see note below
+# diffusers/transformers are pinned to an exact, verified-working pair instead of open
+# floors (`>=`). The container's torch build is frozen (nvcr.io/nvidia/pytorch:24.10-py3,
+# torch 2.5.0a0), and open-ended pins drifted to newer releases that no longer matched it
+# (transformers 5.x needed a torch.distributed.tensor API this torch doesn't have; the
+# newest diffusers needed a transformers class this pin doesn't have). This pair is the
+# one confirmed to import and run SANA cleanly against this container's torch.
 accelerate>=1.0.0        # device placement / cpu offload
 sentencepiece            # tokenizer dep for the text encoder
 protobuf                 # tokenizer/proto dep

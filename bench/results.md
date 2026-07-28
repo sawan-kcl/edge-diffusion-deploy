@@ -8,7 +8,7 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 
 | label | model | size | steps | vram_cap_gb | sec/image | ms/step | peak_vram_gb | clip | date |
 |-------|-------|------|-------|-------------|-----------|---------|--------------|------|------|
-| _(no runs yet)_ | | | | | | | | | |
+| A-baseline | Sana_600M_512px_diffusers | 512px | 20 | none | 11.172 | 558.6 | 5.33 | 33.42 | 2026-07-27 |
 
 ## Narrative (fill as you go)
 

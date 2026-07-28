@@ -78,9 +78,33 @@ def run(label: str, max_vram_gb: float | None, steps: int, guidance: float,
            f"{clip if clip is not None else 'n/a'} | {date.today()} |")
 
     RESULTS.parent.mkdir(exist_ok=True)
-    with open(RESULTS, "a") as f:
-        f.write(row + "\n")
+    _insert_row(row)
     print(f"\nAppended to {RESULTS}:\n{row}")
+
+
+def _insert_row(row: str) -> None:
+    """Insert a row into the results table (not blind EOF-append — the file has a
+    narrative section after the table, so a plain append would land in the wrong place)."""
+    if not RESULTS.exists():
+        RESULTS.write_text(row + "\n")
+        return
+
+    lines = RESULTS.read_text().splitlines()
+    sep_idx = next((i for i, l in enumerate(lines) if l.startswith("|---")), None)
+    if sep_idx is None:
+        RESULTS.write_text(RESULTS.read_text() + row + "\n")
+        return
+
+    table_end = sep_idx + 1
+    while table_end < len(lines) and lines[table_end].startswith("|"):
+        table_end += 1
+
+    if table_end == sep_idx + 1 or "no runs yet" in lines[sep_idx + 1]:
+        lines[sep_idx + 1:table_end] = [row]
+    else:
+        lines[table_end:table_end] = [row]
+
+    RESULTS.write_text("\n".join(lines) + "\n")
 
 
 def main() -> None:
