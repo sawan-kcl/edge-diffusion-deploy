@@ -48,12 +48,12 @@ def maybe_clip_score(images, prompts) -> float | None:
 
 
 def run(label: str, max_vram_gb: float | None, steps: int, guidance: float,
-        model: str, size: int) -> None:
+        model: str, size: int, vae_native_fp32: bool = False) -> None:
     if not torch.cuda.is_available():
         raise SystemExit("CUDA not available — see CLAUDE.md §2 (reboot / --gpus all).")
 
     cap_vram(max_vram_gb)
-    pipe = load_pipeline(model)
+    pipe = load_pipeline(model, vae_native_fp32=vae_native_fp32)
 
     # Warm-up (discarded).
     generate(pipe, PROMPTS[0], steps=steps, guidance=guidance,
@@ -116,8 +116,12 @@ def main() -> None:
     ap.add_argument("--size", type=int, default=512)
     ap.add_argument("--max-vram-gb", type=float,
                     default=float(os.environ.get("EDGE_VRAM_GB", 0)) or None)
+    ap.add_argument("--vae-native-fp32", action="store_true",
+                    help="EXPERIMENT: load VAE at its true on-disk fp32 precision instead of "
+                         "bf16-then-upcast. Same VRAM either way; see CLAUDE.md §5 Phase C.")
     args = ap.parse_args()
-    run(args.label, args.max_vram_gb, args.steps, args.guidance, args.model, args.size)
+    run(args.label, args.max_vram_gb, args.steps, args.guidance, args.model, args.size,
+        vae_native_fp32=args.vae_native_fp32)
 
 
 if __name__ == "__main__":

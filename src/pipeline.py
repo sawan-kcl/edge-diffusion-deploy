@@ -54,16 +54,31 @@ def cap_vram(max_vram_gb: float | None) -> None:
 
 def load_pipeline(model_id: str = DEFAULT_MODEL,
                   dtype: torch.dtype = torch.bfloat16,
-                  offload: bool = True):
+                  offload: bool = True,
+                  vae_native_fp32: bool = False):
     """Load SANA. On 6 GB, model CPU offload keeps the Gemma-2 text encoder from OOMing.
 
     If the text encoder is gated on HuggingFace, run `huggingface-cli login` first
     (see CLAUDE.md §5, Phase A note).
+
+    vae_native_fp32: EXPERIMENT (off by default; see CLAUDE.md §5 Phase C). The saved
+    VAE checkpoint is true fp32 on disk. The default path below loads the whole pipeline
+    in `dtype` (bf16), which downcasts the VAE to bf16 too, then upcasts it back to fp32 —
+    that upcast keeps the fp32 storage size but not the detail already rounded away in the
+    downcast. This flag skips the round trip and loads the VAE at its real on-disk
+    precision from the start, so no detail is ever lost. Same final VRAM either way (the
+    VAE ends up fp32 in both cases) — this is a quality experiment, not a memory trade-off.
     """
     from diffusers import SanaPipeline
 
-    pipe = SanaPipeline.from_pretrained(model_id, torch_dtype=dtype)
+    if vae_native_fp32:
+        from diffusers import AutoencoderDC
+        vae = AutoencoderDC.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float32)
+        pipe = SanaPipeline.from_pretrained(model_id, vae=vae, torch_dtype=dtype)
+    else:
+        pipe = SanaPipeline.from_pretrained(model_id, torch_dtype=dtype)
     # SANA's DC-AE VAE is more stable in fp32; text encoder stays in the compute dtype.
+    # (No-op when vae_native_fp32=True — the VAE is already fp32 at this point.)
     pipe.vae.to(torch.float32)
     pipe.text_encoder.to(dtype)
 
@@ -123,13 +138,16 @@ def main() -> None:
                     default=float(os.environ.get("EDGE_VRAM_GB", 0)) or None,
                     help="Edge memory budget in GB (e.g. 4). Omit for uncapped baseline.")
     ap.add_argument("--no-offload", action="store_true", help="Disable CPU offload (uses more VRAM).")
+    ap.add_argument("--vae-native-fp32", action="store_true",
+                    help="EXPERIMENT: load VAE at its true on-disk fp32 precision instead of "
+                         "bf16-then-upcast. Same VRAM either way; see CLAUDE.md §5 Phase C.")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
         raise SystemExit("CUDA not available — did nvidia-smi work and is the container --gpus all? See CLAUDE.md §2.")
 
     cap_vram(args.max_vram_gb)
-    pipe = load_pipeline(args.model, offload=not args.no_offload)
+    pipe = load_pipeline(args.model, offload=not args.no_offload, vae_native_fp32=args.vae_native_fp32)
 
     # Warm-up run (compile/JIT/allocations) — discarded, per CLAUDE.md §6.
     print("[warmup] first run (discarded)…")

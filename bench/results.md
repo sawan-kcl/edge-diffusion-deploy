@@ -10,6 +10,7 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 |-------|-------|------|-------|-------------|-----------|---------|--------------|------|------|
 | A-baseline | Sana_600M_512px_diffusers | 512px | 20 | none | 11.172 | 558.6 | 5.33 | 33.42 | 2026-07-27 |
 | B-edge-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | OOM | OOM | OOM (~3.83 in use at failure) | n/a | 2026-07-28 |
+| C-vae-native-fp32 | Sana_600M_512px_diffusers | 512px | 20 | none | 11.232 | 561.6 | 5.33 | 33.39 | 2026-07-30 |
 
 ## Narrative (fill as you go)
 
@@ -27,5 +28,6 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 - torch.compile → latency before/after:
 - TensorRT → latency/VRAM before/after:
 - quantization (INT8/FP8) → VRAM/latency before/after, quality cost:
+- [experiment] VAE native fp32 vs. bf16-then-upcast (`--vae-native-fp32`) → CLIP score before/after (expect same VRAM, testing quality only): VRAM identical (5.33 GB both), confirming the "no memory cost" prediction. CLIP 33.39 vs. 33.42 baseline — a 0.03 difference, within normal run-to-run noise, not a meaningful change. Conclusion: skipping the bf16 round-trip is theoretically more precise but produces no measurable quality difference here — the simpler default code isn't actually costing anything in practice for this model.
 
 **One-line summary:** e.g. *"Cut latency X→Y and VRAM 6→<4 GB with <Z CLIP-point quality cost."*
