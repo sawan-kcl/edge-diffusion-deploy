@@ -28,6 +28,37 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 - torch.compile → latency before/after:
 - TensorRT → latency/VRAM before/after:
 - quantization (INT8/FP8) → VRAM/latency before/after, quality cost:
+
+- **[opt #1] Text-encoder 8-bit quantization (`--quantize-text-encoder`, bitsandbytes on Gemma-2 only):**
+  Profiled with `src/profile_vram.py` (phase-marked VRAM trace), 512px / 20 steps, uncapped:
+
+  | phase | no quant | 8-bit encoder |
+  |---|---|---|
+  | total wall | 11.23 s | **4.73 s** (2.4× faster) |
+  | encode | ~7.6 s | ~1.1 s |
+  | denoise (20 steps) | ~1.0 s | ~1.0 s (~49 ms/step) |
+  | decode (VAE) | ~2.7 s | ~2.7 s |
+  | allocator peak VRAM | 5.33 GB | 5.22 GB (≈unchanged) |
+  | peak falls in phase | encode | decode |
+
+  - **This is a latency win, not a memory win (uncapped).** Default `enable_model_cpu_offload()` streams the
+    full ~5 GB bf16 Gemma-2 encoder CPU→GPU→CPU on *every* generation (~7 s). 8-bit shrinks it enough to
+    keep it **pinned resident on the GPU** (excluded from offload) — encode drops from ~7.6 s to ~1.1 s.
+    The bf16 encoder can't be pinned (5 GB won't fit alongside the transformer + VAE on 6 GB); 8-bit is
+    what *enables* the pin, and the pin is what removes the per-generation PCIe round-trip.
+  - **Peak VRAM barely moved** and shifted encode→decode: the pinned encoder now coincides with the fp32
+    VAE decode, which is the new bottleneck.
+  - 8-bit Gemma-2-2B pins at **~3.5 GB**, not ~2.7 — bitsandbytes leaves the embedding table unquantized
+    and Gemma-2's vocab is 256k tokens (~1.2 GB fp16 embedding).
+  - **Still OOMs under the 4 GB cap** (`C-te-8bit-4gb`, not recorded as a row — died in warm-up): the
+    original Phase B *encode* OOM is cleared, but a new *denoise* OOM appears — the offload hook can't fit
+    the transformer (~1.2 GB) onto the GPU on top of the ~3.5 GB pinned encoder (3.73 GiB ceiling).
+  - Bug fixed en route: `enable_model_cpu_offload()` + a bnb-8-bit encoder hit a device-mismatch in
+    `_execution_device` (returns CPU because the pinned/hookless encoder is first in the component list);
+    fix is to add `text_encoder` to `pipe._exclude_from_cpu_offload` before enabling offload.
+  - **Next:** try 4-bit (NF4) — should pin at ~2 GB and clear the 4 GB cap. Then vae-tiling / attention-slicing.
+  - Metric note: `bench.py`'s ms/step is `total_pipe_time / steps`, dominated by encode + decode — not real
+    denoising (~49 ms/step). The step callback now lives in `profile_vram.py` and could feed `bench.py`.
 - [experiment] VAE native fp32 vs. bf16-then-upcast (`--vae-native-fp32`) → CLIP score before/after (expect same VRAM, testing quality only): VRAM identical (5.33 GB both), confirming the "no memory cost" prediction. CLIP 33.39 vs. 33.42 baseline — a 0.03 difference, within normal run-to-run noise, not a meaningful change. Conclusion: skipping the bf16 round-trip is theoretically more precise but produces no measurable quality difference here — the simpler default code isn't actually costing anything in practice for this model.
 
 **One-line summary:** e.g. *"Cut latency X→Y and VRAM 6→<4 GB with <Z CLIP-point quality cost."*

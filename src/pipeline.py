@@ -55,7 +55,8 @@ def cap_vram(max_vram_gb: float | None) -> None:
 def load_pipeline(model_id: str = DEFAULT_MODEL,
                   dtype: torch.dtype = torch.bfloat16,
                   offload: bool = True,
-                  vae_native_fp32: bool = False):
+                  vae_native_fp32: bool = False,
+                  quantize_text_encoder: bool = False):
     """Load SANA. On 6 GB, model CPU offload keeps the Gemma-2 text encoder from OOMing.
 
     If the text encoder is gated on HuggingFace, run `huggingface-cli login` first
@@ -68,21 +69,46 @@ def load_pipeline(model_id: str = DEFAULT_MODEL,
     downcast. This flag skips the round trip and loads the VAE at its real on-disk
     precision from the start, so no detail is ever lost. Same final VRAM either way (the
     VAE ends up fp32 in both cases) — this is a quality experiment, not a memory trade-off.
+
+    quantize_text_encoder: PHASE C optimization #1 (off by default; see CLAUDE.md §5). Loads
+    the Gemma-2 text encoder in 8-bit via bitsandbytes instead of bf16 — roughly halves its
+    weight memory. This is the biggest single module and the exact thing that OOM'd in
+    Phase B, but it only runs once per image (prompt encoding), so it tolerates precision
+    loss better than the transformer (which runs once per denoising step). The diffusion
+    transformer is deliberately left untouched here. Needs CUDA + `bitsandbytes` installed.
     """
     from diffusers import SanaPipeline
 
+    load_kwargs = {}
     if vae_native_fp32:
         from diffusers import AutoencoderDC
-        vae = AutoencoderDC.from_pretrained(model_id, subfolder="vae", torch_dtype=torch.float32)
-        pipe = SanaPipeline.from_pretrained(model_id, vae=vae, torch_dtype=dtype)
-    else:
-        pipe = SanaPipeline.from_pretrained(model_id, torch_dtype=dtype)
+        load_kwargs["vae"] = AutoencoderDC.from_pretrained(
+            model_id, subfolder="vae", torch_dtype=torch.float32)
+    if quantize_text_encoder:
+        from transformers import Gemma2Model, BitsAndBytesConfig
+        load_kwargs["text_encoder"] = Gemma2Model.from_pretrained(
+            model_id, subfolder="text_encoder",
+            quantization_config=BitsAndBytesConfig(load_in_8bit=True),
+            torch_dtype=dtype)
+
+    pipe = SanaPipeline.from_pretrained(model_id, torch_dtype=dtype, **load_kwargs)
     # SANA's DC-AE VAE is more stable in fp32; text encoder stays in the compute dtype.
     # (No-op when vae_native_fp32=True — the VAE is already fp32 at this point.)
     pipe.vae.to(torch.float32)
-    pipe.text_encoder.to(dtype)
+    if not quantize_text_encoder:
+        pipe.text_encoder.to(dtype)   # can't .to(dtype) a bitsandbytes 8-bit module — it raises
 
     if offload:
+        if quantize_text_encoder:
+            # The 8-bit text encoder is pinned to the GPU by bitsandbytes and gets no
+            # offload hook. In diffusers 0.32.2 that makes pipe._execution_device fall
+            # back to self.device (CPU, post-offload) because the text encoder is early
+            # in the component list and has no hook — so prompt token ids get sent to
+            # CPU while the encoder weights sit on GPU → device-mismatch RuntimeError in
+            # index_select. Excluding it from the offload bookkeeping makes
+            # _execution_device skip it and resolve to CUDA off the transformer's hook.
+            # assign (not append) — the default is a shared class-level list
+            pipe._exclude_from_cpu_offload = pipe._exclude_from_cpu_offload + ["text_encoder"]
         pipe.enable_model_cpu_offload()      # streams modules on/off GPU to fit small VRAM
     else:
         pipe.to("cuda")
@@ -141,13 +167,18 @@ def main() -> None:
     ap.add_argument("--vae-native-fp32", action="store_true",
                     help="EXPERIMENT: load VAE at its true on-disk fp32 precision instead of "
                          "bf16-then-upcast. Same VRAM either way; see CLAUDE.md §5 Phase C.")
+    ap.add_argument("--quantize-text-encoder", action="store_true",
+                    help="PHASE C: load the Gemma-2 text encoder in 8-bit (bitsandbytes) to cut "
+                         "VRAM. Transformer left untouched. See CLAUDE.md §5 Phase C.")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
         raise SystemExit("CUDA not available — did nvidia-smi work and is the container --gpus all? See CLAUDE.md §2.")
 
     cap_vram(args.max_vram_gb)
-    pipe = load_pipeline(args.model, offload=not args.no_offload, vae_native_fp32=args.vae_native_fp32)
+    pipe = load_pipeline(args.model, offload=not args.no_offload,
+                         vae_native_fp32=args.vae_native_fp32,
+                         quantize_text_encoder=args.quantize_text_encoder)
 
     # Warm-up run (compile/JIT/allocations) — discarded, per CLAUDE.md §6.
     print("[warmup] first run (discarded)…")

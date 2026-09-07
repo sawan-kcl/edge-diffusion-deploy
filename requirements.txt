@@ -24,5 +24,6 @@ nvidia-ml-py>=12.560.30  # pynvml — GPU temp / power / VRAM logging
 gradio>=4.44.0
 
 # optimization phase (install when you reach Phase C; some are heavy)
+bitsandbytes>=0.44.1     # 8-bit quantization of the Gemma-2 text encoder (Phase C, first step)
 # optimum-quanto>=0.2.4  # INT8/FP8 quantization
 # torchao                # alternative quantization
