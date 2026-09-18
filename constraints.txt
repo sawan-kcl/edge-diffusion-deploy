@@ -9,9 +9,9 @@
 # flash_attn / Gemma-2 loading. Root-caused and the container was rebuilt from scratch.
 #
 # This file is loaded automatically via the PIP_CONSTRAINT env var (set in the container's
-# ~/.bashrc, see CLAUDE.md §8). With it active, ANY `pip install`, even with no special
-# flags, will refuse to change torch's version instead of silently swapping it — you get a
-# visible resolution error immediately, not a mystery ImportError later.
+# ~/.bashrc). With it active, ANY `pip install`, even with no special flags, will refuse to
+# change torch's version instead of silently swapping it — you get a visible resolution
+# error immediately, not a mystery ImportError later.
 #
 # Still prefer `pip install --no-deps <package>` for one-off exploratory installs — this
 # file is the safety net for when that's forgotten, not a replacement for it.

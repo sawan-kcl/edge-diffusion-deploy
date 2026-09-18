@@ -51,7 +51,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
-        raise SystemExit("CUDA not available — see CLAUDE.md §2.")
+        raise SystemExit("CUDA not available.")
 
     cap_vram(args.max_vram_gb)
     pipe = load_pipeline(args.model, offload=not args.no_offload,
@@ -61,7 +61,7 @@ def main() -> None:
     common = dict(prompt=args.prompt, height=args.size, width=args.size,
                   num_inference_steps=args.steps, guidance_scale=args.guidance)
 
-    # Warm-up (discarded, no telemetry) — same rationale as CLAUDE.md §6.
+    # Warm-up (discarded, no telemetry) — so reported numbers are always warm.
     print("[warmup] discarded run…")
     pipe(generator=torch.Generator("cuda").manual_seed(args.seed), **common)
 

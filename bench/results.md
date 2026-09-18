@@ -11,6 +11,8 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 | A-baseline | Sana_600M_512px_diffusers | 512px | 20 | none | 11.172 | 558.6 | 5.33 | 33.42 | 2026-07-27 |
 | B-edge-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | OOM | OOM | OOM (~3.83 in use at failure) | n/a | 2026-07-28 |
 | C-vae-native-fp32 | Sana_600M_512px_diffusers | 512px | 20 | none | 11.232 | 561.6 | 5.33 | 33.39 | 2026-07-30 |
+| C-te-4bit | Sana_600M_512px_diffusers | 512px | 20 | none | 7.652 | 382.6 | 2.51 | 33.19 | 2026-09-18 |
+| C-te-4bit-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 7.662 | 383.1 | 2.51 | 33.19 | 2026-09-18 |
 
 ## Narrative (fill as you go)
 
@@ -56,9 +58,39 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
   - Bug fixed en route: `enable_model_cpu_offload()` + a bnb-8-bit encoder hit a device-mismatch in
     `_execution_device` (returns CPU because the pinned/hookless encoder is first in the component list);
     fix is to add `text_encoder` to `pipe._exclude_from_cpu_offload` before enabling offload.
-  - **Next:** try 4-bit (NF4) — should pin at ~2 GB and clear the 4 GB cap. Then vae-tiling / attention-slicing.
   - Metric note: `bench.py`'s ms/step is `total_pipe_time / steps`, dominated by encode + decode — not real
     denoising (~49 ms/step). The step callback now lives in `profile_vram.py` and could feed `bench.py`.
+
+- **[opt #1b] Text-encoder 4-bit NF4 quantization (`--quantize-text-encoder-4bit`, bitsandbytes on
+  Gemma-2 only) — the actual Phase B fix.** Before trying this, we investigated whether the 8-bit
+  encoder could stay *dynamically* offloaded (moved CPU↔GPU per call, like every other module)
+  instead of pinned — `transformers` hard-blocks this: `ValueError: .to is not supported for 8-bit
+  bitsandbytes models`, a deliberate library guard, not a bug we could work around. So the only lever
+  left for fitting the cap is a *smaller pinned footprint*, which is what 4-bit gives:
+
+  | | baseline (bf16) | 8-bit (pinned) | 4-bit (pinned) |
+  |---|---|---|---|
+  | peak VRAM | 5.33 GB | 5.22 GB | **2.51 GB** |
+  | fits under 4 GB cap? | n/a | **OOMs** (denoise phase) | **yes — comfortably** |
+  | sec/image (uncapped) | 11.17 | 4.73 | 7.65 |
+  | sec/image (4 GB cap) | n/a | n/a (OOM) | 7.66 (~same as uncapped) |
+  | CLIP | 33.42 | n/a | 33.19 |
+
+  - **This is the first optimization that produces a working image under the 4 GB budget** — clears
+    both the original Phase B failure (encoder OOMing while loading onto the GPU) and the new one
+    8-bit introduced (encoder + transformer not fitting together during denoise).
+  - **Capped and uncapped runs are nearly identical** (7.66s/2.51GB vs 7.65s/2.51GB) — there's real
+    headroom under 4 GB, not a knife-edge pass. Confirms the ~2 GB pin estimate from the 8-bit writeup.
+  - **Slower than 8-bit despite being smaller and equally pinned** (7.65s vs 4.73s total): both modes
+    skip the offload round-trip the same way, so the gap isn't PCIe traffic — it's that 4-bit's
+    per-layer dequantization is more expensive to compute than 8-bit's. Smaller memory footprint and
+    faster inference are separate axes here, not the same lever.
+  - **Quality cost is small but real**: CLIP 33.19 vs. 33.42 baseline (−0.23), a slightly bigger drop
+    than the VAE experiment's noise-level ±0.03, consistent with 4-bit being a more aggressive
+    quantization than 8-bit.
+  - Same pinning mechanics as 8-bit (see opt #1 above): `_exclude_from_cpu_offload` for the
+    device-mismatch bug, VRAM cap via `cap_vram()`.
+
 - [experiment] VAE native fp32 vs. bf16-then-upcast (`--vae-native-fp32`) → CLIP score before/after (expect same VRAM, testing quality only): VRAM identical (5.33 GB both), confirming the "no memory cost" prediction. CLIP 33.39 vs. 33.42 baseline — a 0.03 difference, within normal run-to-run noise, not a meaningful change. Conclusion: skipping the bf16 round-trip is theoretically more precise but produces no measurable quality difference here — the simpler default code isn't actually costing anything in practice for this model.
 
 **One-line summary:** e.g. *"Cut latency X→Y and VRAM 6→<4 GB with <Z CLIP-point quality cost."*
