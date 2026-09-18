@@ -1,0 +1,19 @@
+# pip CONSTRAINTS file — not a requirements list, a guardrail.
+#
+# The NGC container (nvcr.io/nvidia/pytorch:24.10-py3) ships a custom-built torch that's
+# compiled together with the container's other prebuilt bits (flash_attn, TensorRT, etc.).
+# A plain PyPI torch wheel is NOT a safe substitute — it silently breaks those prebuilt
+# binaries (undefined-symbol ImportErrors) even though `pip install <anything>` looks like
+# it succeeded. This happened for real: `pip install optimum-quanto` (no --no-deps) pulled
+# in a newer torch as a transitive dependency and replaced the NGC build, which broke
+# flash_attn / Gemma-2 loading. Root-caused and the container was rebuilt from scratch.
+#
+# This file is loaded automatically via the PIP_CONSTRAINT env var (set in the container's
+# ~/.bashrc, see CLAUDE.md §8). With it active, ANY `pip install`, even with no special
+# flags, will refuse to change torch's version instead of silently swapping it — you get a
+# visible resolution error immediately, not a mystery ImportError later.
+#
+# Still prefer `pip install --no-deps <package>` for one-off exploratory installs — this
+# file is the safety net for when that's forgotten, not a replacement for it.
+
+torch==2.5.0a0+e000cf0ad9.nv24.10
