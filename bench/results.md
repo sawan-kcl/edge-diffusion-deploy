@@ -14,6 +14,9 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 | C-te-4bit | Sana_600M_512px_diffusers | 512px | 20 | none | 7.652 | 382.6 | 2.51 | 33.19 | 2026-09-18 |
 | C-te-4bit-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 7.662 | 383.1 | 2.51 | 33.19 | 2026-09-18 |
 
+*No 8-bit rows above:* opt #1 (8-bit text encoder) was measured with `src/profile_vram.py` (one prompt), not
+`bench.py` — uncapped 4.73 s / 5.22 GB; capped at 4 GB it OOMs. Full numbers in the opt #1 note below.
+
 ## Narrative (fill as you go)
 
 **Phase A — baseline (native, uncapped):**
@@ -25,11 +28,9 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 - What broke: the crash is inside `accelerate`'s CPU-offload hook (`pre_forward` → `module.to(execution_device)`), while it tries to move the **Gemma-2 text encoder** onto the GPU to encode the prompt. So under a 4 GB cap, the text encoder alone doesn't fit when its turn comes to be swapped onto the GPU — this happens before the diffusion transformer or VAE are even touched. `enable_model_cpu_offload()` streams modules one at a time, but "one module" here is still too big for the remaining budget.
 
 **Phase C — optimization (per change, keep the deltas):**
-- offload/slicing/tiling → VRAM before/after:
+- VAE tiling → VRAM/latency before/after:
 - fewer steps (20 → ?) → latency before/after, quality cost:
-- torch.compile → latency before/after:
-- TensorRT → latency/VRAM before/after:
-- quantization (INT8/FP8) → VRAM/latency before/after, quality cost:
+- ONNX → TensorRT → latency/VRAM before/after:
 
 - **[opt #1] Text-encoder 8-bit quantization (`--quantize-text-encoder`, bitsandbytes on Gemma-2 only):**
   Profiled with `src/profile_vram.py` (phase-marked VRAM trace), 512px / 20 steps, uncapped:

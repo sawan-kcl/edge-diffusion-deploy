@@ -4,15 +4,15 @@ Running a **transformer-based text-to-image diffusion model** (NVIDIA **SANA 0.6
 product: from R&D baseline → a **memory-constrained "edge" deployment** → an optimization pass, with real
 before/after numbers at every step.
 
-> **Scope note.** This validates the full edge-optimization + MLOps toolchain (quantization, TensorRT,
-> monitoring, OTA model-swap, regression gating) on a **simulated** edge memory budget on a laptop GPU
+> **Scope note.** This validates the full edge-optimization + MLOps toolchain (quantization, ONNX → TensorRT,
+> monitoring, regression gating) on a **simulated** edge memory budget on a laptop GPU
 > (RTX 3060, 6 GB). It is not claimed to run on real edge silicon.
 
 ## The story
 
 1. **R&D / baseline** — get SANA generating on the full GPU, measure it.
 2. **Edge deployment** — containerize and impose a **4 GB VRAM ceiling**, measure under constraint.
-3. **Optimization** — CPU offload, fewer steps, `torch.compile`, **TensorRT**, INT8/FP8 quantization; measure the delta.
+3. **Optimization** — text-encoder quantization, VAE tiling, fewer steps, **ONNX → TensorRT**; measure the delta.
 
 ## Results
 
@@ -36,4 +36,4 @@ seconds/image · ms/denoising-step · peak VRAM (GB) · CLIP score (prompt adher
 
 ## Stack
 
-SANA 0.6B · HuggingFace `diffusers` · PyTorch · TensorRT · CUDA MPS (memory cap) · Docker (NGC) · Gradio · pynvml/Prometheus/Grafana.
+SANA 0.6B · HuggingFace `diffusers` · PyTorch · bitsandbytes · ONNX · TensorRT · Docker (NGC) · Gradio · pynvml.

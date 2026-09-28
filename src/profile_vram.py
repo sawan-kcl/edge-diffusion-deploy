@@ -4,12 +4,13 @@ running, mark the encode / denoise / decode phase boundaries, and report which
 phase the VRAM peak actually falls in.
 
 This is the "profile it instead of guessing" step before picking the next Phase-C
-lever (attention slicing / VAE tiling target the denoise+decode peak; text-encoder
-work only helps the encode phase).
+lever (VAE tiling / TensorRT target the denoise+decode phases; text-encoder work
+only helps the encode phase).
 
   python src/profile_vram.py --steps 20
   python src/profile_vram.py --steps 20 --quantize-text-encoder
   python src/profile_vram.py --steps 20 --quantize-text-encoder --max-vram-gb 4
+  python src/profile_vram.py --steps 20 --quantize-text-encoder-4bit --max-vram-gb 4
 
 Notes:
 - Telemetry VRAM is pynvml's *whole-process* GPU usage (CUDA context + allocator
@@ -48,6 +49,7 @@ def main() -> None:
     ap.add_argument("--no-offload", action="store_true")
     ap.add_argument("--vae-native-fp32", action="store_true")
     ap.add_argument("--quantize-text-encoder", action="store_true")
+    ap.add_argument("--quantize-text-encoder-4bit", action="store_true")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -56,7 +58,8 @@ def main() -> None:
     cap_vram(args.max_vram_gb)
     pipe = load_pipeline(args.model, offload=not args.no_offload,
                          vae_native_fp32=args.vae_native_fp32,
-                         quantize_text_encoder=args.quantize_text_encoder)
+                         quantize_text_encoder=args.quantize_text_encoder,
+                         quantize_text_encoder_4bit=args.quantize_text_encoder_4bit)
 
     common = dict(prompt=args.prompt, height=args.size, width=args.size,
                   num_inference_steps=args.steps, guidance_scale=args.guidance)
@@ -112,6 +115,7 @@ def main() -> None:
     print("\n=== VRAM profile ===")
     print(f"  cap: {args.max_vram_gb or 'none'}   "
           f"quantize_text_encoder: {args.quantize_text_encoder}   "
+          f"4bit: {args.quantize_text_encoder_4bit}   "
           f"vae_native_fp32: {args.vae_native_fp32}")
     print(f"  samples: {len(rows)} @ {args.interval}s   total wall: {t_end:.2f}s")
     print(f"  allocator peak (torch.cuda.max_memory_allocated): {alloc_peak:.2f} GB")

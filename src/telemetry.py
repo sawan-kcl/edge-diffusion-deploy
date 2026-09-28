@@ -2,7 +2,7 @@
 GPU telemetry sampler (pynvml) — Month-2 "monitoring" task.
 
 Use as a context manager around a workload to capture VRAM / temperature / power /
-utilization over time, then dump a CSV you can chart (or later feed to Grafana).
+utilization over time, then dump a CSV you can chart.
 
     from telemetry import GpuTelemetry
     with GpuTelemetry("outputs/telemetry.csv") as t:
