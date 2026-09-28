@@ -14,6 +14,7 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 | C-te-4bit | Sana_600M_512px_diffusers | 512px | 20 | none | 7.652 | 382.6 | 2.51 | 33.19 | 2026-09-18 |
 | C-te-4bit-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 7.662 | 383.1 | 2.51 | 33.19 | 2026-09-18 |
 | C-te-4bit-noinstr-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 7.581 | 379.1 | 2.47 | 33.73 | 2026-09-28 |
+| C-vae-bf16-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 7.254 | 362.7 | 2.47 | 33.74 | 2026-09-28 |
 
 *No 8-bit rows above:* opt #1 (8-bit text encoder) was measured with `src/profile_vram.py` (one prompt), not
 `bench.py` — uncapped 4.73 s / 5.22 GB; capped at 4 GB it OOMs. Full numbers in the opt #1 note below.
@@ -30,7 +31,7 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 
 **Phase C — optimization (per change, keep the deltas):**
 - faster encode → done, see [opt #2a], [finding], [opt #2b] and the C2 result below.
-- bf16 VAE (precision check before TensorRT) → decode time/VRAM before/after, image quality:
+- bf16 VAE (precision check before TensorRT) → done, see [C3.0] below.
 - ONNX → TensorRT (VAE, then transformer) → latency/VRAM before/after:
 - *(optional)* fewer steps (20 → ?) → latency before/after, quality cost:
 
@@ -164,6 +165,24 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 
 **C2 result:** best config under 4 GB = 4-bit streamed encoder + `--no-prompt-instruction` →
 **7.58 s/img, 2.47 GB, CLIP 33.73** (vs A-baseline 11.17 s / 5.33 GB / 33.42, which doesn't fit at all).
+
+- **[C3.0] VAE in bf16 instead of fp32 (`--vae-bf16`)** — precision check before TensorRT, on top of the
+  C2 best config, 4 GB cap:
+
+  | | fp32 VAE (C2 best) | bf16 VAE |
+  |---|---|---|
+  | decode (profile) | 2.71 s | **1.84 s** (−32%) |
+  | decode nvml peak | 2.99 GB | 2.02 GB |
+  | sec/image (bench) | 7.58 | **7.25** |
+  | allocator peak | 2.47 GB | 2.47 GB (peak is in encode) |
+  | CLIP | 33.73 | 33.74 |
+
+  - **The VAE survives bf16:** same-seed images are visually identical to fp32, CLIP unchanged. The fp32
+    upcast in the original code ("for stability") cost ~0.9 s of decode for no visible benefit here.
+  - Caveat for TensorRT: bf16 keeps fp32's numeric range; **fp16 does not**, so fp16 overflow is still
+    untested — build the TRT engine in bf16 first.
+  - Denoise read 1.26 s vs 0.97 s in this single profile; bench total still dropped — treated as noise.
+  - Adopted: new best config = 4-bit streamed encoder + no prompt instruction + bf16 VAE.
 
 - [experiment] VAE native fp32 vs. bf16-then-upcast (`--vae-native-fp32`) → CLIP score before/after (expect same VRAM, testing quality only): VRAM identical (5.33 GB both), confirming the "no memory cost" prediction. CLIP 33.39 vs. 33.42 baseline — a 0.03 difference, within normal run-to-run noise, not a meaningful change. Conclusion: skipping the bf16 round-trip is theoretically more precise but produces no measurable quality difference here — the simpler default code isn't actually costing anything in practice for this model.
 
