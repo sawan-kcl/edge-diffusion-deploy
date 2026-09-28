@@ -50,24 +50,31 @@ def maybe_clip_score(images, prompts) -> float | None:
 def run(label: str, max_vram_gb: float | None, steps: int, guidance: float,
         model: str, size: int, vae_native_fp32: bool = False,
         quantize_text_encoder: bool = False,
-        quantize_text_encoder_4bit: bool = False) -> None:
+        quantize_text_encoder_4bit: bool = False,
+        prompt_instruction: bool = True,
+        pin_text_encoder: bool = False,
+        vae_bf16: bool = False) -> None:
     if not torch.cuda.is_available():
         raise SystemExit("CUDA not available — reboot, or check the container was started with --gpus all.")
 
     cap_vram(max_vram_gb)
     pipe = load_pipeline(model, vae_native_fp32=vae_native_fp32,
                          quantize_text_encoder=quantize_text_encoder,
-                         quantize_text_encoder_4bit=quantize_text_encoder_4bit)
+                         quantize_text_encoder_4bit=quantize_text_encoder_4bit,
+                         pin_text_encoder=pin_text_encoder,
+                         vae_bf16=vae_bf16)
 
     # Warm-up (discarded).
     generate(pipe, PROMPTS[0], steps=steps, guidance=guidance,
-             height=size, width=size, vram_cap_gb=max_vram_gb, save=False)
+             height=size, width=size, vram_cap_gb=max_vram_gb, save=False,
+             prompt_instruction=prompt_instruction)
 
     secs, ms, peaks, images = [], [], [], []
     for i, prompt in enumerate(PROMPTS):
         r = generate(pipe, prompt, steps=steps, guidance=guidance,
                      height=size, width=size, seed=i,
-                     vram_cap_gb=max_vram_gb, save=True)
+                     vram_cap_gb=max_vram_gb, save=True,
+                     prompt_instruction=prompt_instruction)
         secs.append(r.sec_per_image)
         ms.append(r.ms_per_step)
         peaks.append(r.peak_vram_gb)
@@ -130,11 +137,22 @@ def main() -> None:
                     help="PHASE C: load the Gemma-2 text encoder in 4-bit NF4 (bitsandbytes) "
                          "instead of 8-bit — smaller pinned footprint. Mutually exclusive with "
                          "--quantize-text-encoder.")
+    ap.add_argument("--no-prompt-instruction", action="store_true",
+                    help="PHASE C: skip SANA's built-in instruction text prepended to every prompt "
+                         "(~550 → ~300 encoder tokens). Faster encode; may cost quality.")
+    ap.add_argument("--pin-text-encoder", action="store_true",
+                    help="PHASE C: keep the 4-bit text encoder on the GPU instead of streaming it "
+                         "from CPU every call. Requires --quantize-text-encoder-4bit.")
+    ap.add_argument("--vae-bf16", action="store_true",
+                    help="PHASE C: keep the VAE in bf16 instead of fp32 (precision check before TensorRT).")
     args = ap.parse_args()
     run(args.label, args.max_vram_gb, args.steps, args.guidance, args.model, args.size,
         vae_native_fp32=args.vae_native_fp32,
         quantize_text_encoder=args.quantize_text_encoder,
-        quantize_text_encoder_4bit=args.quantize_text_encoder_4bit)
+        quantize_text_encoder_4bit=args.quantize_text_encoder_4bit,
+        prompt_instruction=not args.no_prompt_instruction,
+        pin_text_encoder=args.pin_text_encoder,
+        vae_bf16=args.vae_bf16)
 
 
 if __name__ == "__main__":

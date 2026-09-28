@@ -57,7 +57,9 @@ def load_pipeline(model_id: str = DEFAULT_MODEL,
                   offload: bool = True,
                   vae_native_fp32: bool = False,
                   quantize_text_encoder: bool = False,
-                  quantize_text_encoder_4bit: bool = False):
+                  quantize_text_encoder_4bit: bool = False,
+                  pin_text_encoder: bool = False,
+                  vae_bf16: bool = False):
     """Load SANA. On 6 GB, model CPU offload keeps the Gemma-2 text encoder from OOMing.
 
     If the text encoder is gated on HuggingFace, run `huggingface-cli login` first.
@@ -78,14 +80,23 @@ def load_pipeline(model_id: str = DEFAULT_MODEL,
     so it tolerates precision loss better than the transformer (which runs once per
     denoising step, left untouched here). Needs CUDA + `bitsandbytes` installed.
 
-    Both quantized modes are permanently GPU-resident ("pinned"), never offloaded to CPU:
-    `transformers` hard-blocks `.to()` on a quantized bnb model (confirmed for 8-bit — a
-    deliberate library guard, not a bug), so there's no dynamic on/off-GPU streaming for either mode — the
-    only lever for fitting a VRAM budget is how small the pinned footprint is, hence trying
-    4-bit after 8-bit still didn't clear the cap.
+    The two modes offload differently. 8-bit is always GPU-resident ("pinned"): `transformers`
+    blocks `.to()` on 8-bit bnb models, so it can't be streamed. 4-bit CAN be moved, so by
+    default it's streamed CPU→GPU on every call like the other modules (small peak VRAM, but
+    ~4 s encode spent copying weights).
+
+    pin_text_encoder: 4-bit only. Keep the encoder on the GPU instead of streaming it —
+    faster encode, but its ~2.3 GB stays resident during denoise/decode.
+
+    vae_bf16: keep the VAE in `dtype` (bf16) instead of upcasting it to fp32. Tests whether
+    the VAE survives reduced precision (a TensorRT prerequisite); halves its memory.
     """
+    if vae_bf16 and vae_native_fp32:
+        raise ValueError("vae_bf16 and vae_native_fp32 are mutually exclusive")
     if quantize_text_encoder and quantize_text_encoder_4bit:
         raise ValueError("quantize_text_encoder and quantize_text_encoder_4bit are mutually exclusive")
+    if pin_text_encoder and not quantize_text_encoder_4bit:
+        raise ValueError("pin_text_encoder requires quantize_text_encoder_4bit (8-bit is always pinned)")
     quantized_te = quantize_text_encoder or quantize_text_encoder_4bit
 
     from diffusers import SanaPipeline
@@ -110,22 +121,29 @@ def load_pipeline(model_id: str = DEFAULT_MODEL,
     pipe = SanaPipeline.from_pretrained(model_id, torch_dtype=dtype, **load_kwargs)
     # SANA's DC-AE VAE is more stable in fp32; text encoder stays in the compute dtype.
     # (No-op when vae_native_fp32=True — the VAE is already fp32 at this point.)
-    pipe.vae.to(torch.float32)
+    if not vae_bf16:
+        pipe.vae.to(torch.float32)
     if not quantized_te:
         pipe.text_encoder.to(dtype)   # can't .to(dtype) a bitsandbytes quantized module — it raises
 
     if offload:
         if quantized_te:
-            # The quantized text encoder is pinned to the GPU by bitsandbytes and gets no
-            # offload hook. In diffusers 0.32.2 that makes pipe._execution_device fall
-            # back to self.device (CPU, post-offload) because the text encoder is early
-            # in the component list and has no hook — so prompt token ids get sent to
-            # CPU while the encoder weights sit on GPU → device-mismatch RuntimeError in
-            # index_select. Excluding it from the offload bookkeeping makes
-            # _execution_device skip it and resolve to CUDA off the transformer's hook.
+            # A pinned (hookless) text encoder makes diffusers 0.32.2's _execution_device fall
+            # back to self.device (CPU, post-offload), since the encoder is first in the
+            # component list — token ids go to CPU while weights sit on GPU → device-mismatch
+            # RuntimeError. Excluding it makes _execution_device resolve off the transformer's hook.
             # assign (not append) — the default is a shared class-level list
             pipe._exclude_from_cpu_offload = pipe._exclude_from_cpu_offload + ["text_encoder"]
+        if pin_text_encoder:
+            # The exclude list is ignored for modules in model_cpu_offload_seq, so the text
+            # encoder must also be dropped from the sequence or it still gets an offload hook.
+            pipe.model_cpu_offload_seq = "->".join(
+                m for m in pipe.model_cpu_offload_seq.split("->") if m != "text_encoder")
         pipe.enable_model_cpu_offload()      # streams modules on/off GPU to fit small VRAM
+        if pin_text_encoder:
+            pipe.text_encoder.to("cuda")
+            if type(getattr(pipe.text_encoder, "_hf_hook", None)).__name__ == "CpuOffload":
+                raise RuntimeError("pin_text_encoder: text encoder still has a CPU-offload hook")
     else:
         pipe.to("cuda")
     return pipe
@@ -133,10 +151,13 @@ def load_pipeline(model_id: str = DEFAULT_MODEL,
 
 def generate(pipe, prompt: str, steps: int = 20, guidance: float = 4.5,
              height: int = 512, width: int = 512, seed: int | None = 0,
-             vram_cap_gb: float | None = None, save: bool = True) -> GenResult:
+             vram_cap_gb: float | None = None, save: bool = True,
+             prompt_instruction: bool = True) -> GenResult:
     """Run one generation and return its metrics. Assumes the first (warm-up) call is discarded upstream."""
     torch.cuda.reset_peak_memory_stats()
     generator = None if seed is None else torch.Generator("cuda").manual_seed(seed)
+    # SANA prepends a ~250-token built-in instruction to every prompt by default; None skips it.
+    extra = {} if prompt_instruction else {"complex_human_instruction": None}
 
     torch.cuda.synchronize()
     t0 = time.perf_counter()
@@ -147,6 +168,7 @@ def generate(pipe, prompt: str, steps: int = 20, guidance: float = 4.5,
         num_inference_steps=steps,
         guidance_scale=guidance,
         generator=generator,
+        **extra,
     ).images[0]
     torch.cuda.synchronize()
     sec = time.perf_counter() - t0
@@ -190,6 +212,14 @@ def main() -> None:
                     help="PHASE C: load the Gemma-2 text encoder in 4-bit NF4 (bitsandbytes) "
                          "instead of 8-bit — smaller pinned footprint. Mutually exclusive with "
                          "--quantize-text-encoder.")
+    ap.add_argument("--no-prompt-instruction", action="store_true",
+                    help="PHASE C: skip SANA's built-in instruction text prepended to every prompt "
+                         "(~550 → ~300 encoder tokens). Faster encode; may cost quality.")
+    ap.add_argument("--pin-text-encoder", action="store_true",
+                    help="PHASE C: keep the 4-bit text encoder on the GPU instead of streaming it "
+                         "from CPU every call. Requires --quantize-text-encoder-4bit.")
+    ap.add_argument("--vae-bf16", action="store_true",
+                    help="PHASE C: keep the VAE in bf16 instead of fp32 (precision check before TensorRT).")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -199,17 +229,21 @@ def main() -> None:
     pipe = load_pipeline(args.model, offload=not args.no_offload,
                          vae_native_fp32=args.vae_native_fp32,
                          quantize_text_encoder=args.quantize_text_encoder,
-                         quantize_text_encoder_4bit=args.quantize_text_encoder_4bit)
+                         quantize_text_encoder_4bit=args.quantize_text_encoder_4bit,
+                         pin_text_encoder=args.pin_text_encoder,
+                         vae_bf16=args.vae_bf16)
 
     # Warm-up run (compile/JIT/allocations) — discarded so reported numbers are always warm.
     print("[warmup] first run (discarded)…")
     generate(pipe, args.prompt, steps=args.steps, guidance=args.guidance,
              height=args.height, width=args.width, seed=args.seed,
-             vram_cap_gb=args.max_vram_gb, save=False)
+             vram_cap_gb=args.max_vram_gb, save=False,
+             prompt_instruction=not args.no_prompt_instruction)
 
     res = generate(pipe, args.prompt, steps=args.steps, guidance=args.guidance,
                    height=args.height, width=args.width, seed=args.seed,
-                   vram_cap_gb=args.max_vram_gb, save=True)
+                   vram_cap_gb=args.max_vram_gb, save=True,
+                   prompt_instruction=not args.no_prompt_instruction)
 
     print("\n=== metrics ===")
     for k, v in asdict(res).items():

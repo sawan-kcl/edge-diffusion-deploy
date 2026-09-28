@@ -50,6 +50,9 @@ def main() -> None:
     ap.add_argument("--vae-native-fp32", action="store_true")
     ap.add_argument("--quantize-text-encoder", action="store_true")
     ap.add_argument("--quantize-text-encoder-4bit", action="store_true")
+    ap.add_argument("--no-prompt-instruction", action="store_true")
+    ap.add_argument("--pin-text-encoder", action="store_true")
+    ap.add_argument("--vae-bf16", action="store_true")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -59,10 +62,14 @@ def main() -> None:
     pipe = load_pipeline(args.model, offload=not args.no_offload,
                          vae_native_fp32=args.vae_native_fp32,
                          quantize_text_encoder=args.quantize_text_encoder,
-                         quantize_text_encoder_4bit=args.quantize_text_encoder_4bit)
+                         quantize_text_encoder_4bit=args.quantize_text_encoder_4bit,
+                         pin_text_encoder=args.pin_text_encoder,
+                         vae_bf16=args.vae_bf16)
 
     common = dict(prompt=args.prompt, height=args.size, width=args.size,
                   num_inference_steps=args.steps, guidance_scale=args.guidance)
+    if args.no_prompt_instruction:
+        common["complex_human_instruction"] = None
 
     # Warm-up (discarded, no telemetry) — so reported numbers are always warm.
     print("[warmup] discarded run…")
@@ -116,6 +123,9 @@ def main() -> None:
     print(f"  cap: {args.max_vram_gb or 'none'}   "
           f"quantize_text_encoder: {args.quantize_text_encoder}   "
           f"4bit: {args.quantize_text_encoder_4bit}   "
+          f"no_prompt_instruction: {args.no_prompt_instruction}   "
+          f"pin_te: {args.pin_text_encoder}   "
+          f"vae_bf16: {args.vae_bf16}   "
           f"vae_native_fp32: {args.vae_native_fp32}")
     print(f"  samples: {len(rows)} @ {args.interval}s   total wall: {t_end:.2f}s")
     print(f"  allocator peak (torch.cuda.max_memory_allocated): {alloc_peak:.2f} GB")
