@@ -11,8 +11,13 @@ only helps the encode phase).
   python src/profile_vram.py --steps 20 --quantize-text-encoder
   python src/profile_vram.py --steps 20 --quantize-text-encoder --max-vram-gb 4
   python src/profile_vram.py --steps 20 --quantize-text-encoder-4bit --max-vram-gb 4
+  python src/profile_vram.py --quantize-text-encoder-4bit --no-prompt-instruction --vae-bf16 \
+      --max-vram-gb 4 --split-decode
 
 Notes:
+- --split-decode times the pieces of the decode phase separately (model moves vs VAE
+  compute vs finishing) and counts allocator retries (cache flush + retry when the cap is hit).
+  It adds GPU syncs, so total time reads slightly higher.
 - Telemetry VRAM is pynvml's *whole-process* GPU usage (CUDA context + allocator
   reserve + everything), so it reads a few hundred MB higher than bench.py's
   `torch.cuda.max_memory_allocated()`. Compare shapes over time, not absolutes;
@@ -53,6 +58,8 @@ def main() -> None:
     ap.add_argument("--no-prompt-instruction", action="store_true")
     ap.add_argument("--pin-text-encoder", action="store_true")
     ap.add_argument("--vae-bf16", action="store_true")
+    ap.add_argument("--split-decode", action="store_true",
+                    help="Break the decode phase into model-move / VAE compute / finish timings")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -76,13 +83,45 @@ def main() -> None:
     pipe(generator=torch.Generator("cuda").manual_seed(args.seed), **common)
 
     step_times: list[float] = []       # perf_counter of each denoise-step-end, rel. to wall0
+    marks: dict[str, float] = {}       # --split-decode timestamps, rel. to wall0
+    retries: dict[str, int] = {}       # allocator retry counts at those points
+
+    def n_retries() -> int:
+        return torch.cuda.memory_stats().get("num_alloc_retries", 0)
+
+    if args.split_decode:
+        # Installed after warm-up so only the measured run is timed.
+        # vae.decode: the offload hook (transformer off GPU, VAE on) runs *inside* it, before
+        # vae.decoder is called — so decode entry → decoder entry = time spent moving models.
+        orig_decode, orig_decoder_fwd = pipe.vae.decode, pipe.vae.decoder.forward
+
+        def timed_decode(*a, **k):
+            torch.cuda.synchronize()
+            marks["decode_call"] = time.perf_counter() - wall0
+            retries["decode_call"] = n_retries()
+            return orig_decode(*a, **k)
+
+        def timed_decoder_fwd(*a, **k):
+            torch.cuda.synchronize()
+            marks.setdefault("compute_start", time.perf_counter() - wall0)
+            out = orig_decoder_fwd(*a, **k)
+            torch.cuda.synchronize()
+            marks["compute_end"] = time.perf_counter() - wall0
+            return out
+
+        pipe.vae.decode = timed_decode
+        pipe.vae.decoder.forward = timed_decoder_fwd
+
     torch.cuda.reset_peak_memory_stats()
+    retries["start"] = n_retries()
     torch.cuda.synchronize()
 
     with GpuTelemetry(args.out, interval_s=args.interval) as tel:
         wall0 = time.perf_counter()
 
         def on_step_end(pipe_, i, t, kw):
+            if args.split_decode:
+                torch.cuda.synchronize()  # so the last mark is when denoising really ends
             step_times.append(time.perf_counter() - wall0)
             return kw
 
@@ -144,6 +183,20 @@ def main() -> None:
             if lo <= overall["t_s"] <= hi:
                 print(f"\n  → peak is in the '{name.split(' (')[0]}' phase")
                 break
+
+    if args.split_decode and "compute_end" in marks:
+        retries["end"] = n_retries()
+        parts = [
+            ("gap (denoise → vae.decode)", denoise_end, marks["decode_call"]),
+            ("move models (offload hooks)", marks["decode_call"], marks["compute_start"]),
+            ("VAE compute", marks["compute_start"], marks["compute_end"]),
+            ("finish (→ PIL, offload VAE)", marks["compute_end"], t_end),
+        ]
+        print("\n  decode phase, split:")
+        for name, lo, hi in parts:
+            print(f"    {name:<30} {hi-lo:>6.2f}s")
+        print(f"  allocator retries: {retries['decode_call'] - retries['start']} before decode, "
+              f"{retries['end'] - retries['decode_call']} during decode")
 
     print(f"\n  csv:   {args.out}")
     print(f"  image: {img_path}")

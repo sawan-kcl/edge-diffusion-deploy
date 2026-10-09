@@ -184,6 +184,39 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
   - Denoise read 1.26 s vs 0.97 s in this single profile; bench total still dropped — treated as noise.
   - Adopted: new best config = 4-bit streamed encoder + no prompt instruction + bf16 VAE.
 
+- **[C3.2] VAE → TensorRT engine (`trtexec --bf16`)** — built from the C3.1 ONNX file; checked with
+  `src/check_trt_vae.py` on a fixed latent (0–255 pixel scale, vs the fp32 PyTorch reference):
+
+  | | PyTorch bf16 | TensorRT `--bf16` |
+  |---|---|---|
+  | max pixel diff | 14.17 | 18.85 |
+  | mean pixel diff | 0.253 | **0.233** |
+  | decode, GPU only (mean of 10) | **172.7 ms** | 283.6 ms (0.6×) |
+  | GPU memory | ~0.3 GB weights | ~1.46 GB (weights + workspace) |
+
+  - **Correct:** images look identical; mean error is slightly *lower* than bf16 PyTorch.
+  - **But slower and bigger.** The engine file (626 MB) is about the size of the fp32 ONNX (637 MB) —
+    `--bf16` only *allows* bf16 kernels, it doesn't force them, so TensorRT likely kept most layers in fp32.
+    Lesson: a TensorRT engine is not automatically faster than a well-tuned PyTorch bf16 model; check the
+    precision it actually picked.
+
+- **[C3.2a] Where the decode time goes** (`profile_vram.py --split-decode`, best config, 4 GB cap):
+
+  | part of the decode phase | time |
+  |---|---|
+  | move models (offload hooks: transformer off GPU, VAE on) | **1.56 s** |
+  | VAE compute | 0.18 s |
+  | finish (→ PIL image, VAE back to CPU) | 0.56 s |
+  | gap after denoising | 0.00 s |
+  | allocator retries (cache flush under the cap) | **0** |
+
+  - **~90% of decode is moving weights between CPU and GPU, not computing.** CPU offload keeps one model
+    on the GPU at a time, so every image pays for the shuffle. TensorRT can only speed up the 0.18 s.
+  - The "4 GB cap causes allocator pressure" guess was wrong — zero retries.
+  - Whole run was slow (10.4 s vs ~7.7 s usual, likely background load), so read the split as proportions.
+  - Not pursued (scope): keeping the VAE/transformer resident on the GPU would remove most of it —
+    decode peaks at ~2 GB, so there is room under 4 GB. Good "what would you do next?" answer.
+
 - [experiment] VAE native fp32 vs. bf16-then-upcast (`--vae-native-fp32`) → CLIP score before/after (expect same VRAM, testing quality only): VRAM identical (5.33 GB both), confirming the "no memory cost" prediction. CLIP 33.39 vs. 33.42 baseline — a 0.03 difference, within normal run-to-run noise, not a meaningful change. Conclusion: skipping the bf16 round-trip is theoretically more precise but produces no measurable quality difference here — the simpler default code isn't actually costing anything in practice for this model.
 
 **One-line summary:** e.g. *"Cut latency X→Y and VRAM 6→<4 GB with <Z CLIP-point quality cost."*
