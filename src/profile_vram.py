@@ -58,6 +58,7 @@ def main() -> None:
     ap.add_argument("--no-prompt-instruction", action="store_true")
     ap.add_argument("--pin-text-encoder", action="store_true")
     ap.add_argument("--vae-bf16", action="store_true")
+    ap.add_argument("--trt-vae", metavar="ENGINE")
     ap.add_argument("--split-decode", action="store_true",
                     help="Break the decode phase into model-move / VAE compute / finish timings")
     args = ap.parse_args()
@@ -71,7 +72,8 @@ def main() -> None:
                          quantize_text_encoder=args.quantize_text_encoder,
                          quantize_text_encoder_4bit=args.quantize_text_encoder_4bit,
                          pin_text_encoder=args.pin_text_encoder,
-                         vae_bf16=args.vae_bf16)
+                         vae_bf16=args.vae_bf16,
+                         trt_vae=args.trt_vae)
 
     common = dict(prompt=args.prompt, height=args.size, width=args.size,
                   num_inference_steps=args.steps, guidance_scale=args.guidance)
@@ -133,7 +135,7 @@ def main() -> None:
         torch.cuda.synchronize()
         t_end = time.perf_counter() - wall0
 
-    alloc_peak = torch.cuda.max_memory_allocated() / 1e9
+    alloc_peak = torch.cuda.max_memory_allocated() / 1e9 + getattr(pipe, "trt_vae_resident_gb", 0.0)
     img_path = OUTPUT_DIR / f"vram_profile_{int(time.time())}.png"
     image.save(img_path)
 

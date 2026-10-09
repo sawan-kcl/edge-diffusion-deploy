@@ -53,7 +53,8 @@ def run(label: str, max_vram_gb: float | None, steps: int, guidance: float,
         quantize_text_encoder_4bit: bool = False,
         prompt_instruction: bool = True,
         pin_text_encoder: bool = False,
-        vae_bf16: bool = False) -> None:
+        vae_bf16: bool = False,
+        trt_vae: str | None = None) -> None:
     if not torch.cuda.is_available():
         raise SystemExit("CUDA not available — reboot, or check the container was started with --gpus all.")
 
@@ -62,7 +63,8 @@ def run(label: str, max_vram_gb: float | None, steps: int, guidance: float,
                          quantize_text_encoder=quantize_text_encoder,
                          quantize_text_encoder_4bit=quantize_text_encoder_4bit,
                          pin_text_encoder=pin_text_encoder,
-                         vae_bf16=vae_bf16)
+                         vae_bf16=vae_bf16,
+                         trt_vae=trt_vae)
 
     # Warm-up (discarded).
     generate(pipe, PROMPTS[0], steps=steps, guidance=guidance,
@@ -145,6 +147,9 @@ def main() -> None:
                          "from CPU every call. Requires --quantize-text-encoder-4bit.")
     ap.add_argument("--vae-bf16", action="store_true",
                     help="PHASE C: keep the VAE in bf16 instead of fp32 (precision check before TensorRT).")
+    ap.add_argument("--trt-vae", metavar="ENGINE",
+                    help="PHASE C: decode with this TensorRT VAE engine instead of the PyTorch VAE "
+                         "(512px only; build it with export_vae_onnx.py --bf16 + trtexec --stronglyTyped).")
     args = ap.parse_args()
     run(args.label, args.max_vram_gb, args.steps, args.guidance, args.model, args.size,
         vae_native_fp32=args.vae_native_fp32,
@@ -152,7 +157,8 @@ def main() -> None:
         quantize_text_encoder_4bit=args.quantize_text_encoder_4bit,
         prompt_instruction=not args.no_prompt_instruction,
         pin_text_encoder=args.pin_text_encoder,
-        vae_bf16=args.vae_bf16)
+        vae_bf16=args.vae_bf16,
+        trt_vae=args.trt_vae)
 
 
 if __name__ == "__main__":

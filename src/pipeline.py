@@ -52,6 +52,47 @@ def cap_vram(max_vram_gb: float | None) -> None:
           f"(fraction {frac:.3f})")
 
 
+class TrtVaeDecoder:
+    """Drop-in for `pipe.vae.decode` that runs a TensorRT engine of the VAE decoder.
+
+    Fixed shape: the engine only accepts the latent it was built for (one 512px image).
+    Memory accounting: the engine's working memory is borrowed from PyTorch's allocator on each
+    call, so it counts against the VRAM cap; its weights are allocated by TensorRT, outside the
+    cap — measured once here as `resident_gb` and added to the reported peak by `generate()`.
+    """
+
+    def __init__(self, engine_path: str):
+        import tensorrt as trt
+        free_before = torch.cuda.mem_get_info()[0]
+        runtime = trt.Runtime(trt.Logger(trt.Logger.WARNING))
+        self.engine = runtime.deserialize_cuda_engine(Path(engine_path).read_bytes())
+        self.context = self.engine.create_execution_context(
+            trt.ExecutionContextAllocationStrategy.USER_MANAGED)
+        torch.cuda.synchronize()
+        self.resident_gb = (free_before - torch.cuda.mem_get_info()[0]) / 1e9
+        self.in_shape = tuple(self.engine.get_tensor_shape("latent"))
+        self.out_shape = tuple(self.engine.get_tensor_shape("image"))
+        self.workspace_bytes = self.engine.device_memory_size_v2
+        self.stream = torch.cuda.Stream()  # TensorRT adds extra syncs on the default stream
+
+    def __call__(self, z: torch.Tensor, return_dict: bool = False):
+        if return_dict:
+            raise NotImplementedError("TrtVaeDecoder only supports return_dict=False")
+        if tuple(z.shape) != self.in_shape:
+            raise ValueError(f"TensorRT VAE engine was built for latent {self.in_shape}, got "
+                             f"{tuple(z.shape)} — it only supports one 512px image")
+        latent = z.float().contiguous()
+        image = torch.empty(self.out_shape, dtype=torch.float32, device=z.device)
+        workspace = torch.empty(self.workspace_bytes, dtype=torch.uint8, device=z.device)
+        self.context.set_tensor_address("latent", latent.data_ptr())
+        self.context.set_tensor_address("image", image.data_ptr())
+        self.context.set_device_memory(workspace.data_ptr(), self.workspace_bytes)
+        self.stream.wait_stream(torch.cuda.current_stream())
+        self.context.execute_async_v3(self.stream.cuda_stream)
+        torch.cuda.current_stream().wait_stream(self.stream)
+        return (image,)
+
+
 def load_pipeline(model_id: str = DEFAULT_MODEL,
                   dtype: torch.dtype = torch.bfloat16,
                   offload: bool = True,
@@ -59,7 +100,8 @@ def load_pipeline(model_id: str = DEFAULT_MODEL,
                   quantize_text_encoder: bool = False,
                   quantize_text_encoder_4bit: bool = False,
                   pin_text_encoder: bool = False,
-                  vae_bf16: bool = False):
+                  vae_bf16: bool = False,
+                  trt_vae: str | None = None):
     """Load SANA. On 6 GB, model CPU offload keeps the Gemma-2 text encoder from OOMing.
 
     If the text encoder is gated on HuggingFace, run `huggingface-cli login` first.
@@ -90,6 +132,10 @@ def load_pipeline(model_id: str = DEFAULT_MODEL,
 
     vae_bf16: keep the VAE in `dtype` (bf16) instead of upcasting it to fp32. Tests whether
     the VAE survives reduced precision (a TensorRT prerequisite); halves its memory.
+
+    trt_vae: path to a TensorRT VAE-decoder engine. Replaces `pipe.vae.decode` with the engine;
+    the PyTorch VAE is never called (its weights stay on CPU). The engine stays on the GPU, so
+    decode no longer waits for the VAE to be moved there.
     """
     if vae_bf16 and vae_native_fp32:
         raise ValueError("vae_bf16 and vae_native_fp32 are mutually exclusive")
@@ -146,6 +192,12 @@ def load_pipeline(model_id: str = DEFAULT_MODEL,
                 raise RuntimeError("pin_text_encoder: text encoder still has a CPU-offload hook")
     else:
         pipe.to("cuda")
+
+    if trt_vae:
+        decoder = TrtVaeDecoder(trt_vae)
+        pipe.vae.decode = decoder        # SanaPipeline calls self.vae.decode(..., return_dict=False)
+        pipe.trt_vae_resident_gb = decoder.resident_gb
+        print(f"[trt] VAE engine {trt_vae} loaded, ~{decoder.resident_gb:.2f} GB resident (outside the cap)")
     return pipe
 
 
@@ -173,7 +225,8 @@ def generate(pipe, prompt: str, steps: int = 20, guidance: float = 4.5,
     torch.cuda.synchronize()
     sec = time.perf_counter() - t0
 
-    peak_gb = torch.cuda.max_memory_allocated() / 1e9
+    # + TensorRT engine weights, which live outside PyTorch's allocator (0 without --trt-vae)
+    peak_gb = torch.cuda.max_memory_allocated() / 1e9 + getattr(pipe, "trt_vae_resident_gb", 0.0)
     img_path = ""
     if save:
         OUTPUT_DIR.mkdir(exist_ok=True)
@@ -220,6 +273,9 @@ def main() -> None:
                          "from CPU every call. Requires --quantize-text-encoder-4bit.")
     ap.add_argument("--vae-bf16", action="store_true",
                     help="PHASE C: keep the VAE in bf16 instead of fp32 (precision check before TensorRT).")
+    ap.add_argument("--trt-vae", metavar="ENGINE",
+                    help="PHASE C: decode with this TensorRT VAE engine instead of the PyTorch VAE "
+                         "(512px only; build it with export_vae_onnx.py --bf16 + trtexec --stronglyTyped).")
     args = ap.parse_args()
 
     if not torch.cuda.is_available():
@@ -231,7 +287,8 @@ def main() -> None:
                          quantize_text_encoder=args.quantize_text_encoder,
                          quantize_text_encoder_4bit=args.quantize_text_encoder_4bit,
                          pin_text_encoder=args.pin_text_encoder,
-                         vae_bf16=args.vae_bf16)
+                         vae_bf16=args.vae_bf16,
+                         trt_vae=args.trt_vae)
 
     # Warm-up run (compile/JIT/allocations) — discarded so reported numbers are always warm.
     print("[warmup] first run (discarded)…")

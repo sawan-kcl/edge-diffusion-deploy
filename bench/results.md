@@ -15,6 +15,9 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
 | C-te-4bit-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 7.662 | 383.1 | 2.51 | 33.19 | 2026-09-18 |
 | C-te-4bit-noinstr-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 7.581 | 379.1 | 2.47 | 33.73 | 2026-09-28 |
 | C-vae-bf16-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 7.254 | 362.7 | 2.47 | 33.74 | 2026-09-28 |
+| C-trt-vae-4gb-battery | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 10.416 | 520.8 | 2.8 | 33.73 | 2026-10-09 |
+| C-vae-bf16-4gb-rerun | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 10.746 | 537.3 | 2.47 | 33.74 | 2026-10-09 |
+| C-trt-vae-4gb | Sana_600M_512px_diffusers | 512px | 20 | 4.0 | 10.076 | 503.8 | 2.8 | 33.73 | 2026-10-09 |
 
 *No 8-bit rows above:* opt #1 (8-bit text encoder) was measured with `src/profile_vram.py` (one prompt), not
 `bench.py` — uncapped 4.73 s / 5.22 GB; capped at 4 GB it OOMs. Full numbers in the opt #1 note below.
@@ -216,6 +219,26 @@ peak VRAM is `torch.cuda.max_memory_allocated()`; CLIP is a prompt-adherence pro
   - Whole run was slow (10.4 s vs ~7.7 s usual, likely background load), so read the split as proportions.
   - Not pursued (scope): keeping the VAE/transformer resident on the GPU would remove most of it —
     decode peaks at ~2 GB, so there is room under 4 GB. Good "what would you do next?" answer.
+
+- **[C3.3] TensorRT VAE in the pipeline (`--trt-vae`)** — same-day, plugged-in pair (2026-10-09):
+
+  | | sec/image | peak VRAM | CLIP |
+  |---|---|---|---|
+  | PyTorch bf16 VAE (`C-vae-bf16-4gb-rerun`) | 10.75 | 2.47 GB | 33.74 |
+  | TensorRT bf16 VAE (`C-trt-vae-4gb`) | **10.08** (−0.67 s, −6%) | 2.80 GB | 33.73 |
+
+  - **Faster, same quality, +0.33 GB** — the engine's weights stay on the GPU (counted in peak VRAM,
+    since TensorRT allocates them outside PyTorch's cap). Engine: strict bf16 (`export_vae_onnx.py --bf16`
+    + `trtexec --stronglyTyped`) — the third try, after `--bf16` (stayed fp32, 0.6×) and `--fp16` (NaN).
+  - Small win, as expected: decode compute was only ~0.2 s; most of the saving is likely the VAE no longer
+    being moved CPU→GPU each image (see [C3.2a]).
+  - Compare only the two rows above: **this machine ran ~45% slower on 2026-10-09** than on 2026-09-28
+    (same config: 7.25 → 10.75 s), cause not found. Rows from different days aren't comparable.
+
+- **[power] Battery vs plugged in** — `C-trt-vae-4gb-battery` (10.42 s) ran on battery; the same config
+  plugged in gave 10.08 s — only **3% slower on battery**. So battery was *not* the main cause of the
+  slow day (the plugged-in rerun was slow too). Edge lesson anyway: record power state with every
+  benchmark, and compare runs from the same session.
 
 - [experiment] VAE native fp32 vs. bf16-then-upcast (`--vae-native-fp32`) → CLIP score before/after (expect same VRAM, testing quality only): VRAM identical (5.33 GB both), confirming the "no memory cost" prediction. CLIP 33.39 vs. 33.42 baseline — a 0.03 difference, within normal run-to-run noise, not a meaningful change. Conclusion: skipping the bf16 round-trip is theoretically more precise but produces no measurable quality difference here — the simpler default code isn't actually costing anything in practice for this model.
 
